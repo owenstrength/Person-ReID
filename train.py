@@ -1,15 +1,29 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchvision import transforms
 from torch.utils.data import DataLoader, random_split
-from torch.optim.lr_scheduler import StepLR
+from torchvision import transforms
 from sklearn.metrics import accuracy_score
+import numpy as np
+from tqdm import tqdm
 
 from utils.market1501 import Market1501Dataset
-from models.oreid import OReID  # Make sure to import your custom model
+from models.resnetreid import ResNetReID
 
-# Data loading and preprocessing
+# Set random seed for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+
+# Device configuration
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Hyperparameters
+BATCH_SIZE = 32
+NUM_EPOCHS = 100
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 5e-4
+
+# Data transforms
 transform_train = transforms.Compose([
     transforms.Resize((256, 128)),
     transforms.RandomHorizontalFlip(),
@@ -24,139 +38,131 @@ transform_val = transforms.Compose([
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-# Market 1501 dataset
+# Load and split dataset
 full_dataset = Market1501Dataset(root_dir='./datasets/market1501/Market-1501-v15.09.15/pytorch/train', transform=transform_train)
 train_size = int(0.8 * len(full_dataset))
 val_size = len(full_dataset) - train_size
 train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 val_dataset.dataset.transform = transform_val
 
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
-val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
-# Model initialization
-model = OReID(num_classes=len(full_dataset.classes))
+# Initialize model, loss, and optimizer
+model = ResNetReID(num_classes=len(full_dataset.classes)).to(device)
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
-scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
-# Training and validation loop
-num_epochs = 50
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+def train(model, dataloader, criterion, optimizer, device, epoch=0):
+    model.train()
+    total_loss = 0
+    total_correct = 0
+    total_samples = 0
 
-def extract_features(model, dataloader):
+    for batch in tqdm(dataloader, desc=f"Training Epoch {epoch}", leave=False,  bar_format='{l_bar}{bar:50}{r_bar}{bar:-50b}'):
+        images, labels = batch
+        images, labels = images.to(device), labels.to(device)
+
+        optimizer.zero_grad()
+        features, outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * images.size(0)
+        _, predicted = torch.max(outputs, 1)
+        total_correct += (predicted == labels).sum().item()
+        total_samples += labels.size(0)
+
+    epoch_loss = total_loss / total_samples
+    epoch_acc = total_correct / total_samples
+    return epoch_loss, epoch_acc
+
+def validate(model, dataloader, criterion, device, epoch=0):
     model.eval()
-    features = []
-    labels = []
-    with torch.no_grad():
-        for data, target in dataloader:
-            data = data.to(device)
-            feature, _ = model(data)
-            features.append(feature.cpu().numpy())
-            labels.append(target.numpy())
-    return np.concatenate(features), np.concatenate(labels)
+    total_loss = 0
+    total_correct = 0
+    total_samples = 0
+    all_features = []
+    all_labels = []
 
-def compute_distance_matrix(query_features, gallery_features):
-    query_features = query_features / np.linalg.norm(query_features, axis=1, keepdims=True)
-    gallery_features = gallery_features / np.linalg.norm(gallery_features, axis=1, keepdims=True)
-    dist_matrix = 2 - 2 * np.dot(query_features, gallery_features.T)
-    return dist_matrix
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc=f"Validating Epoch {epoch}", leave=False, bar_format='{l_bar}{bar:50}{r_bar}{bar:-50b}'):
+            images, labels = batch
+            images, labels = images.to(device), labels.to(device)
+
+            features = model(images)
+            outputs = model.classifier(features)
+            loss = criterion(outputs, labels)
+
+            total_loss += loss.item() * images.size(0)
+            _, predicted = torch.max(outputs, 1)
+            total_correct += (predicted == labels).sum().item()
+            total_samples += labels.size(0)
+
+            all_features.append(features.cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
+
+    epoch_loss = total_loss / total_samples
+    epoch_acc = total_correct / total_samples
+    
+    all_features = np.concatenate(all_features, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+    
+    return epoch_loss, epoch_acc, all_features, all_labels
+
+def compute_distance_matrix(features):
+    features = features / np.linalg.norm(features, axis=1, keepdims=True)
+    return 2 - 2 * np.dot(features, features.T)
 
 def compute_map_and_cmc(dist_matrix, query_labels, gallery_labels, top_k):
     num_queries, num_gallery = dist_matrix.shape
     indices = np.argsort(dist_matrix, axis=1)
-    
     matches = (gallery_labels[indices] == query_labels[:, np.newaxis]).astype(np.int32)
-    
+
     # Compute CMC
-    cmc = matches.cumsum(axis=1).mean(axis=0)
-    cmc = cmc[:top_k]
-    
+    cmc = np.zeros(top_k)
+    for i in range(num_queries):
+        rank = np.where(matches[i] == 1)[0]
+        if rank.size > 0:
+            rank = rank[0]
+            if rank < top_k:
+                cmc[rank:] += 1
+    cmc = cmc / num_queries
+
     # Compute mAP
-    num_relevant = (query_labels[:, np.newaxis] == gallery_labels).sum(axis=1)
-    tmp_cmc = matches.cumsum(axis=1)
-    tmp_cmc = [tmp_cmc[:, i] / (i + 1.0) for i in range(tmp_cmc.shape[1])]
-    tmp_cmc = np.stack(tmp_cmc, axis=1)
-    ap = tmp_cmc.sum(axis=1) / num_relevant
-    map_score = ap.mean()
+    ap = np.zeros(num_queries)
+    for i in range(num_queries):
+        relevant_rank = np.where(matches[i] == 1)[0]
+        if relevant_rank.size > 0:
+            ap[i] = np.sum((np.arange(relevant_rank.size) + 1) / (relevant_rank + 1)) / matches[i].sum()
     
+    map_score = ap.mean()
+
     return map_score, cmc
 
-# Training and validation loop
-num_epochs = 50
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+model.load_state_dict(torch.load('best_reid_model.pth'))
 
-best_val_map = 0.0
 
-for epoch in range(num_epochs):
-    model.train()
-    train_loss = 0.0
-    train_predictions = []
-    train_targets = []
-
-    for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
-        features, output = model(data)
-        loss = criterion(output, target)
-        loss.backward()
-        optimizer.step()
-        
-        train_loss += loss.item()
-        _, predicted = torch.max(output, 1)
-        train_predictions.extend(predicted.cpu().numpy())
-        train_targets.extend(target.cpu().numpy())
-
-        if (batch_idx + 1) % 100 == 0:
-            print(f'Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.4f}')
-
-    train_accuracy = accuracy_score(train_targets, train_predictions)
-    train_loss /= len(train_loader)
-
-    # Validation
-    model.eval()
-    val_loss = 0.0
-    val_predictions = []
-    val_targets = []
-
-    # Extract features for validation set
-    val_features, val_labels = extract_features(model, val_loader)
-
-    # Compute distance matrix
-    dist_matrix = compute_distance_matrix(val_features, val_features)
-
-    # Compute mAP and CMC
+# Training loop
+best_map = 0.0
+for epoch in range(NUM_EPOCHS):
+    train_loss, train_acc = train(model, train_loader, criterion, optimizer, device, epoch=epoch)
+    val_loss, val_acc, val_features, val_labels = validate(model, val_loader, criterion, device, epoch=epoch)
+    
+    dist_matrix = compute_distance_matrix(val_features)
     map_score, cmc = compute_map_and_cmc(dist_matrix, val_labels, val_labels, top_k=10)
-
-    with torch.no_grad():
-        for data, target in val_loader:
-            data, target = data.to(device), target.to(device)
-            features, output = model(data)
-            loss = criterion(output, target)
-            val_loss += loss.item()
-            _, predicted = torch.max(output, 1)
-            val_predictions.extend(predicted.cpu().numpy())
-            val_targets.extend(target.cpu().numpy())
-
-    val_accuracy = accuracy_score(val_targets, val_predictions)
-    val_loss /= len(val_loader)
-
-    print(f'Epoch {epoch+1}/{num_epochs}:')
-    print(f'Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}')
-    print(f'Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}')
-    print(f'Validation mAP: {map_score:.4f}')
-    print(f'Validation CMC: {cmc}')
-
-    # Save the best model based on mAP
-    if map_score > best_val_map:
-        best_val_map = map_score
+    
+    print(f"Epoch {epoch+1}/{NUM_EPOCHS}")
+    print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
+    print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+    print(f"mAP: {map_score:.4f}, Rank-1: {cmc[0]:.4f}, Rank-5: {cmc[4]:.4f}, Rank-10: {cmc[9]:.4f}")
+    
+    if map_score > best_map:
+        best_map = map_score
         torch.save(model.state_dict(), 'best_reid_model.pth')
+        print("Saved new best model")
+    
+    print()
 
-    scheduler.step()
-
-print(f'Best validation mAP: {best_val_map:.4f}')
-
-# Save the final model
-torch.save(model.state_dict(), 'final_reid_model.pth')
+print(f"Training completed. Best mAP: {best_map:.4f}")
