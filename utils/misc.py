@@ -47,3 +47,67 @@ def split_dataset_by_id(dataset, train_ratio=0.8):
     val_dataset = Subset(dataset, val_indices)
     
     return train_dataset, val_dataset
+
+def compute_distance_matrix(features):
+    """
+    Compute the distance matrix between feature vectors.
+
+    Args:
+        features (numpy.ndarray): Array of feature vectors.
+
+    Returns:
+        numpy.ndarray: Distance matrix.
+    """
+    norms = np.linalg.norm(features, axis=1, keepdims=True)
+    features_normalized = features / norms
+
+    dot_product = np.dot(features_normalized, features_normalized.T)
+    dist_matrix = np.sqrt(2 - 2 * dot_product)
+
+    dist_matrix = np.maximum(dist_matrix, 0)
+
+    np.fill_diagonal(dist_matrix, np.inf)
+    
+    return dist_matrix
+
+def compute_map_and_cmc(dist_matrix, query_labels, gallery_labels, top_k):
+    """
+    Compute Mean Average Precision (mAP) and Cumulative Matching Characteristics (CMC) given a distance matrix,
+    query labels, gallery labels, and top-k value.
+
+    Args:
+        dist_matrix (numpy.ndarray): The distance matrix of shape (num_queries, num_gallery) containing pairwise distances between queries and gallery samples.
+        query_labels (numpy.ndarray): The labels of the query samples of shape (num_queries,).
+        gallery_labels (numpy.ndarray): The labels of the gallery samples of shape (num_gallery,).
+        top_k (int): The maximum rank to consider for computing CMC.
+
+    Returns:
+        tuple: A tuple containing the mAP score and the CMC values.
+
+    """
+    num_queries, num_gallery = dist_matrix.shape
+    indices = np.argsort(dist_matrix, axis=1)
+    matches = (gallery_labels[indices] == query_labels[:, np.newaxis]).astype(np.int32)
+
+    # Compute CMC
+    cmc = np.zeros(top_k)
+    for i in range(num_queries):
+        rank = np.where(matches[i] == 1)[0]
+        if rank.size > 0:
+            rank = rank[0]
+            if rank < top_k:
+                cmc[rank:] += 1
+    cmc = cmc / num_queries
+
+    # Compute mAP
+    ap = np.zeros(num_queries)
+    for i in range(num_queries):
+        relevant = matches[i]
+        if relevant.sum() > 0:
+            cumsum = np.cumsum(relevant)
+            precision = cumsum / (np.arange(num_gallery) + 1)
+            ap[i] = (precision * relevant).sum() / relevant.sum()
+    
+    map_score = ap.mean()
+
+    return map_score, cmc
