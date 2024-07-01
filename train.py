@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,7 +9,9 @@ import numpy as np
 from tqdm import tqdm
 
 from utils.market1501 import Market1501Dataset
+from utils.misc import split_dataset_by_id
 from models.resnetreid import ResNetReID
+
 
 # Set random seed for reproducibility
 torch.manual_seed(42)
@@ -42,7 +45,7 @@ transform_val = transforms.Compose([
 full_dataset = Market1501Dataset(root_dir='./datasets/market1501/Market-1501-v15.09.15/pytorch/train', transform=transform_train)
 train_size = int(0.8 * len(full_dataset))
 val_size = len(full_dataset) - train_size
-train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+train_dataset, val_dataset = split_dataset_by_id(full_dataset, train_ratio=0.8)
 val_dataset.dataset.transform = transform_val
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
@@ -112,8 +115,17 @@ def validate(model, dataloader, criterion, device, epoch=0):
     return epoch_loss, epoch_acc, all_features, all_labels
 
 def compute_distance_matrix(features):
-    features = features / np.linalg.norm(features, axis=1, keepdims=True)
-    return 2 - 2 * np.dot(features, features.T)
+    norms = np.linalg.norm(features, axis=1, keepdims=True)
+    features_normalized = features / norms
+
+    dot_product = np.dot(features_normalized, features_normalized.T)
+    dist_matrix = np.sqrt(2 - 2 * dot_product)
+
+    dist_matrix = np.maximum(dist_matrix, 0)
+
+    np.fill_diagonal(dist_matrix, np.inf)
+    
+    return dist_matrix
 
 def compute_map_and_cmc(dist_matrix, query_labels, gallery_labels, top_k):
     num_queries, num_gallery = dist_matrix.shape
@@ -133,15 +145,19 @@ def compute_map_and_cmc(dist_matrix, query_labels, gallery_labels, top_k):
     # Compute mAP
     ap = np.zeros(num_queries)
     for i in range(num_queries):
-        relevant_rank = np.where(matches[i] == 1)[0]
-        if relevant_rank.size > 0:
-            ap[i] = np.sum((np.arange(relevant_rank.size) + 1) / (relevant_rank + 1)) / matches[i].sum()
+        relevant = matches[i]
+        if relevant.sum() > 0:
+            cumsum = np.cumsum(relevant)
+            precision = cumsum / (np.arange(num_gallery) + 1)
+            ap[i] = (precision * relevant).sum() / relevant.sum()
     
     map_score = ap.mean()
 
     return map_score, cmc
 
-model.load_state_dict(torch.load('best_reid_model.pth'))
+if os.path.exists('best_reid_model.pth'):
+    model.load_state_dict(torch.load('best_reid_model.pth'))
+    print("Loaded pre-trained model")
 
 
 # Training loop
