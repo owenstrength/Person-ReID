@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from utils.market1501 import Market1501Dataset
 from utils.misc import split_dataset_by_id
-from models.resnetreid import ResNetReID
+from models.resnetreid import ResNetReID, CrossEntropyLabelSmooth
 
 
 # Set random seed for reproducibility
@@ -53,7 +53,7 @@ val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_w
 
 # Initialize model, loss, and optimizer
 model = ResNetReID(num_classes=len(full_dataset.classes)).to(device)
-criterion = nn.CrossEntropyLoss()
+criterion = CrossEntropyLabelSmooth(num_classes=len(full_dataset.classes))
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
 def train(model, dataloader, criterion, optimizer, device, epoch=0):
