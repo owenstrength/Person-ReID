@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 
 from utils.market1501 import Market1501Dataset
-from utils.misc import split_dataset_by_id
+from utils.misc import compute_distance_matrix, compute_map_and_cmc, split_dataset_by_id
 from models.resnetreid import ResNetReID, CrossEntropyLabelSmooth
 
 
@@ -32,13 +32,13 @@ transform_train = transforms.Compose([
     transforms.RandomHorizontalFlip(),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]) # This is the mean and std deviation of Market-1501 dataset
 ])
 
 transform_val = transforms.Compose([
     transforms.Resize((256, 128)),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]) # This is the mean and std deviation of Market-1501 dataset
 ])
 
 # Load and split dataset
@@ -113,47 +113,6 @@ def validate(model, dataloader, criterion, device, epoch=0):
     all_labels = np.concatenate(all_labels, axis=0)
     
     return epoch_loss, epoch_acc, all_features, all_labels
-
-def compute_distance_matrix(features):
-    norms = np.linalg.norm(features, axis=1, keepdims=True)
-    features_normalized = features / norms
-
-    dot_product = np.dot(features_normalized, features_normalized.T)
-    dist_matrix = np.sqrt(2 - 2 * dot_product)
-
-    dist_matrix = np.maximum(dist_matrix, 0)
-
-    np.fill_diagonal(dist_matrix, np.inf)
-    
-    return dist_matrix
-
-def compute_map_and_cmc(dist_matrix, query_labels, gallery_labels, top_k):
-    num_queries, num_gallery = dist_matrix.shape
-    indices = np.argsort(dist_matrix, axis=1)
-    matches = (gallery_labels[indices] == query_labels[:, np.newaxis]).astype(np.int32)
-
-    # Compute CMC
-    cmc = np.zeros(top_k)
-    for i in range(num_queries):
-        rank = np.where(matches[i] == 1)[0]
-        if rank.size > 0:
-            rank = rank[0]
-            if rank < top_k:
-                cmc[rank:] += 1
-    cmc = cmc / num_queries
-
-    # Compute mAP
-    ap = np.zeros(num_queries)
-    for i in range(num_queries):
-        relevant = matches[i]
-        if relevant.sum() > 0:
-            cumsum = np.cumsum(relevant)
-            precision = cumsum / (np.arange(num_gallery) + 1)
-            ap[i] = (precision * relevant).sum() / relevant.sum()
-    
-    map_score = ap.mean()
-
-    return map_score, cmc
 
 if os.path.exists('best_reid_model.pth'):
     model.load_state_dict(torch.load('best_reid_model.pth'))
