@@ -54,8 +54,8 @@ This loss function distributes a small probability (ε) uniformly among all clas
 
 After training, our model achieved the following performance on the test set:
 
-- **mAP (mean Average Precision)**: 0.6846
-- **Rank-1 Accuracy (CMC@1)**: 0.9248
+- **mAP (mean Average Precision)**: 0.7837
+- **Rank-1 Accuracy (CMC@1)**: 0.9348
 - **Rank-5 Accuracy (CMC@5)**: 0.9825
 - **Rank-10 Accuracy (CMC@10)**: 0.9903
 
