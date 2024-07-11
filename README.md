@@ -59,7 +59,7 @@ After training, our model achieved the following performance on the test set:
 - **Rank-5 Accuracy (CMC@5)**: 0.9825
 - **Rank-10 Accuracy (CMC@10)**: 0.9903
 
-These results demonstrate strong performance, with the model correctly identifying the same person in the top-1 match 92.48% of the time, and in the top-5 matches 98.25% of the time.
+These results demonstrate strong performance, with the model correctly identifying the same person in the top-1 match 93.48% of the time, and in the top-5 matches 98.25% of the time.
 
 ![Training Curves](output/cmc_curve.png)
 
